@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>memaudit — see where your DRAM actually goes</title>
+<meta name="description" content="memaudit watches real access patterns — DAMON, PSI, NUMA, cgroup v2 — and shows you exactly which pages are cold enough to tier, offload, or kill. Apply as a pre-GA design partner.">
+<link rel="canonical" href="https://memaudit.dev/">
+<meta name="theme-color" content="#0a0d10">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="memaudit">
+<meta property="og:title" content="memaudit — see where your DRAM actually goes">
+<meta property="og:description" content="memaudit watches real access patterns — DAMON, PSI, NUMA, cgroup v2 — and shows you exactly which pages are cold enough to tier, offload, or kill.">
+<meta property="og:url" content="https://memaudit.dev/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="memaudit — see where your DRAM actually goes">
+<meta name="twitter:description" content="memaudit watches real access patterns — DAMON, PSI, NUMA, cgroup v2 — and shows you exactly which pages are cold enough to tier, offload, or kill.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='2' fill='%230a0d10'/%3E%3Crect x='5' y='5' width='6' height='6' rx='1' fill='%23ff6b4a'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #0a0d10;
+    --bg-alt: #0d1114;
+    --panel: #12171c;
+    --panel-2: #161c22;
+    --border: #232b32;
+    --text: #e7ecef;
+    --muted: #8a97a3;
+    --muted-2: #78838d;
+    --hot: #ff6b4a;
+    --hot-dim: #7a3b2c;
+    --cold: #4fa3d1;
+    --cold-deep: #2c6e9e;
+    --green: #63c89a;
+    --sans: 'IBM Plex Sans', -apple-system, sans-serif;
+    --mono: 'IBM Plex Mono', ui-monospace, monospace;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html{scroll-behavior:smooth; color-scheme:dark;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    -webkit-tap-highlight-color:transparent;
+  }
+  a{color:inherit;}
+  .wrap{max-width:1120px; margin:0 auto; padding:0 28px;}
+  ::selection{background:var(--hot); color:#0a0d10;}
+  :focus-visible{outline:2px solid var(--cold); outline-offset:3px;}
+
+  .skip-link{
+    position:absolute; top:-48px; left:12px; z-index:100;
+    background:var(--panel); color:var(--text); border:1px solid var(--border);
+    font-family:var(--mono); font-size:13px; padding:10px 16px; border-radius:4px;
+    transition:top 0.15s;
+  }
+  .skip-link:focus{top:12px;}
+
+  /* ---------- nav ---------- */
+  nav{
+    position:sticky; top:0; z-index:50;
+    background:rgba(10,13,16,0.88);
+    backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--border);
+  }
+  nav .wrap{
+    display:flex; align-items:center; justify-content:space-between;
+    height:64px;
+  }
+  .logo{
+    font-family:var(--mono); font-weight:600; font-size:15px;
+    letter-spacing:0.02em; display:flex; align-items:center; gap:8px;
+  }
+  .logo .dot{width:7px; height:7px; border-radius:1px; background:var(--hot); display:inline-block;}
+  .navlinks{display:flex; gap:32px; font-size:14px; color:var(--muted);}
+  .navlinks a{text-decoration:none; transition:color 0.15s;}
+  .navlinks a:hover{color:var(--text);}
+  .nav-cta{
+    font-family:var(--mono); font-size:13px; color:var(--text);
+    text-decoration:none; border-bottom:1px solid var(--text);
+    padding-bottom:2px; transition:opacity 0.15s; white-space:nowrap;
+  }
+  .nav-cta:hover{opacity:0.7;}
+  @media (max-width:760px){ .navlinks{display:none;} }
+
+  /* ---------- hero ---------- */
+  .hero{padding:88px 0 0;}
+
+  .hero-status{
+    font-family:var(--mono); font-size:12px; color:var(--muted-2);
+    letter-spacing:0.04em; margin-bottom:22px;
+  }
+
+  .hero-prompt{
+    font-family:var(--mono); font-size:13px; color:var(--muted); margin-bottom:44px;
+  }
+  .prompt-symbol{color:var(--green); margin-right:8px;}
+  .cursor{display:inline-block; margin-left:2px; color:var(--cold); animation:blink 1.1s step-start infinite;}
+  @keyframes blink{ 50%{ opacity:0; } }
+  @media (prefers-reduced-motion:reduce){ .cursor{animation:none;} }
+
+  .hero-number{display:flex; align-items:baseline; gap:12px; line-height:0.85;}
+  .hero-number .num{
+    font-family:var(--mono); font-weight:700; letter-spacing:-0.02em;
+    font-size:clamp(76px, 12vw, 168px); color:var(--text);
+  }
+  .hero-number .unit{
+    font-family:var(--mono); font-weight:600; color:var(--cold);
+    font-size:clamp(24px, 3vw, 38px);
+  }
+  .hero-tier{
+    font-family:var(--mono); font-size:13px; color:var(--cold);
+    text-transform:uppercase; letter-spacing:0.06em; margin:16px 0 40px;
+  }
+
+  .hero-bar{
+    display:flex; width:100%; height:7px; background:rgba(255,255,255,0.05);
+    border-radius:1px; overflow:hidden; margin-bottom:16px;
+  }
+  .bar-seg{height:100%;}
+  .bar-seg.cold{background:var(--cold);}
+  .bar-seg.warm{background:#3d4750;}
+  .bar-seg.hot{background:var(--hot);}
+
+  .hero-bar-legend{
+    display:flex; flex-wrap:wrap; column-gap:24px; row-gap:8px;
+    font-family:var(--mono); font-size:12.5px; color:var(--muted); margin-bottom:48px;
+  }
+  .hero-bar-legend b{color:var(--text); font-weight:600;}
+  .hero-bar-legend .dot{
+    display:inline-block; width:7px; height:7px; border-radius:1px;
+    margin-right:7px; vertical-align:middle;
+  }
+  .hero-bar-legend .dot.cold{background:var(--cold);}
+  .hero-bar-legend .dot.warm{background:#3d4750;}
+  .hero-bar-legend .dot.hot{background:var(--hot);}
+  .hero-bar-legend .dim{color:var(--muted-2);}
+
+  .hero-lead{
+    font-size:clamp(22px, 2.6vw, 28px); font-weight:600; letter-spacing:-0.01em;
+    max-width:30ch; margin-bottom:18px; line-height:1.25; text-wrap:balance;
+  }
+  .hero-desc{
+    font-size:16px; color:var(--muted); max-width:52ch; margin-bottom:40px; line-height:1.6;
+  }
+  .hero-desc strong{color:var(--text); font-weight:500;}
+
+  .hero-links{
+    display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+    font-family:var(--mono); font-size:14px; margin-bottom:64px;
+  }
+  .link-primary{
+    color:var(--text); text-decoration:none; border-bottom:1px solid var(--text);
+    padding-bottom:2px; transition:opacity 0.15s;
+  }
+  .link-primary:hover{opacity:0.7;}
+  .link-secondary{
+    color:var(--muted); text-decoration:none; border-bottom:1px solid transparent;
+    padding-bottom:2px; transition:color 0.15s, border-color 0.15s;
+  }
+  .link-secondary:hover{color:var(--text); border-color:var(--muted-2);}
+  .hero-links .sep{color:var(--muted-2);}
+
+  /* bare heatmap — no card chrome */
+  .hero-visual{
+    border-top:1px solid var(--border); padding:28px 28px 40px;
+  }
+  .hv-label{
+    display:flex; justify-content:space-between; font-family:var(--mono);
+    font-size:11px; letter-spacing:0.03em; margin-bottom:10px;
+  }
+  .hv-label span:first-child{color:var(--hot); opacity:0.8;}
+  .hv-label span:last-child{color:var(--cold);}
+  canvas#heat{display:block; width:100%; height:auto; cursor:crosshair;}
+  .hv-caption{font-family:var(--mono); font-size:11px; color:var(--muted-2); margin-top:10px;}
+
+  .heat-tooltip{
+    position:fixed; pointer-events:none; z-index:100;
+    font-family:var(--mono); font-size:11px; line-height:1.6;
+    background:#0d1114; border:1px solid var(--border); border-radius:5px;
+    padding:8px 10px; opacity:0; transition:opacity 0.1s;
+    box-shadow:0 8px 20px rgba(0,0,0,0.4); white-space:nowrap;
+  }
+  .heat-tooltip.show{opacity:1;}
+  .heat-tooltip .addr{color:var(--text);}
+  .heat-tooltip .cold-line{color:var(--cold);}
+  .heat-tooltip .hot-line{color:var(--hot); opacity:0.85;}
+  .heat-tooltip .dim{color:var(--muted-2);}
+
+  /* ---------- section shared ---------- */
+  section{padding:64px 0; scroll-margin-top:80px;}
+  .section-head{max-width:56ch; margin-bottom:40px;}
+  .section-eyebrow{
+    font-family:var(--mono); font-size:12px; color:var(--muted-2);
+    letter-spacing:0.08em; text-transform:uppercase; margin-bottom:10px;
+  }
+  h2{font-size:clamp(24px,3vw,32px); font-weight:700; letter-spacing:-0.01em; margin-bottom:12px; text-wrap:balance;}
+  .section-head p{color:var(--muted); font-size:15.5px;}
+
+  /* ---------- problem ---------- */
+  .problem{border-top:1px solid var(--border); border-bottom:1px solid var(--border); background:var(--bg-alt);}
+  .problem-grid{display:grid; grid-template-columns:repeat(3,1fr);}
+  .problem-card{padding:28px 30px 28px 0;}
+  .problem-card + .problem-card{padding-left:30px; border-left:1px solid var(--border);}
+  @media (max-width:760px){
+    .problem-grid{grid-template-columns:1fr;}
+    .problem-card{padding:24px 0;}
+    .problem-card + .problem-card{padding-left:0; border-left:none; border-top:1px solid var(--border);}
+  }
+  .problem-card .num{font-family:var(--mono); font-size:12px; color:var(--hot); margin-bottom:14px;}
+  .problem-card p{color:var(--muted); font-size:14.5px; line-height:1.6;}
+  .problem-card p strong{color:var(--text); font-weight:500;}
+
+  /* ---------- collectors ---------- */
+  .coll-layout{display:grid; grid-template-columns:1.3fr 1fr; gap:32px; align-items:start;}
+  @media (max-width:900px){ .coll-layout{grid-template-columns:1fr;} }
+
+  .coll-grid{display:grid; grid-template-columns:repeat(auto-fit, minmax(240px,1fr)); gap:14px;}
+  .coll-card{
+    position:relative; overflow:hidden;
+    border:1px solid var(--border); padding:20px 22px; transition:border-color 0.15s;
+  }
+  .coll-card:hover{border-color:var(--muted-2);}
+  .coll-card::before{
+    content:''; position:absolute; inset:0; opacity:0; pointer-events:none;
+    transition:opacity 0.25s;
+    background:radial-gradient(220px circle at var(--mx,50%) var(--my,50%), rgba(79,163,209,0.14), transparent 70%);
+  }
+  .coll-card.gpu::before{
+    background:radial-gradient(220px circle at var(--mx,50%) var(--my,50%), rgba(255,107,74,0.14), transparent 70%);
+  }
+  .coll-card:hover::before{opacity:1;}
+  .coll-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; position:relative;}
+  .coll-name{font-family:var(--mono); font-size:14px; font-weight:600; position:relative;}
+  .coll-tag{
+    font-family:var(--mono); font-size:10px; padding:2px 7px; border-radius:3px;
+    text-transform:uppercase; letter-spacing:0.04em; position:relative;
+  }
+  .tag-kernel{background:rgba(79,163,209,0.12); color:var(--cold);}
+  .tag-gpu{background:rgba(255,107,74,0.12); color:var(--hot);}
+  .coll-card p{color:var(--muted); font-size:13.5px; position:relative;}
+
+  /* scroll-linked visual panel */
+  .coll-visual{position:sticky; top:88px;}
+  @media (max-width:900px){ .coll-visual{display:none;} }
+  .cv-panel{
+    border:1px solid var(--border); padding:22px; overflow:hidden;
+  }
+  .cv-header{margin-bottom:16px;}
+  .cv-eyebrow{
+    display:block; font-family:var(--mono); font-size:11px; color:var(--muted-2);
+    text-transform:uppercase; letter-spacing:0.08em; margin-bottom:6px;
+  }
+  .cv-active{
+    font-family:var(--mono); font-size:20px; font-weight:600; color:var(--cold);
+    transition:color 0.3s;
+  }
+  .cv-panel.gpu .cv-active{color:var(--hot);}
+  .cv-grid{
+    display:grid; grid-template-columns:repeat(8,1fr); gap:5px;
+    position:relative; margin-bottom:16px; padding:14px 0;
+  }
+  .cv-cell{
+    width:100%; padding-top:100%; border-radius:2px; position:relative;
+    background:rgba(90,100,110,0.18); transition:transform 0.35s;
+  }
+  .cv-cell.kernel{background:rgba(79,163,209,0.16);}
+  .cv-cell.gpu{background:rgba(255,107,74,0.16);}
+  .cv-cell.active.kernel{
+    background:var(--cold); box-shadow:0 0 10px rgba(79,163,209,0.55); transform:scale(1.04);
+  }
+  .cv-cell.active.gpu{
+    background:var(--hot); box-shadow:0 0 10px rgba(255,107,74,0.5); transform:scale(1.04);
+  }
+  .cv-divider{
+    position:absolute; left:50%; top:0; bottom:0; width:1px;
+    background:var(--muted-2); opacity:0; transition:opacity 0.3s;
+  }
+  .cv-divider.show{opacity:0.6;}
+  .cv-divider::before, .cv-divider::after{
+    content:''; position:absolute; left:50%; transform:translateX(-50%);
+    font-family:var(--mono); font-size:9px; color:var(--muted-2);
+  }
+  .cv-meta{border-top:1px solid var(--border); padding-top:14px;}
+  .cv-meta-row{
+    display:flex; justify-content:space-between; align-items:baseline;
+    font-family:var(--mono); font-size:12.5px; padding:5px 0;
+  }
+  .cv-meta-row span:first-child{color:var(--muted-2); text-transform:uppercase; letter-spacing:0.05em; font-size:10.5px;}
+  .cv-meta-row span:last-child{color:var(--text); text-align:right; overflow-wrap:anywhere; margin-left:12px;}
+
+  /* ---------- pipeline ---------- */
+  .pipeline{
+    display:flex; align-items:stretch; gap:0; overflow-x:auto;
+    font-family:var(--mono); border-top:1px solid var(--border); border-bottom:1px solid var(--border);
+  }
+  .pipe-step{
+    flex:1; min-width:150px; padding:22px 18px; position:relative;
+    border-right:1px solid var(--border);
+  }
+  .pipe-step:last-child{border-right:none;}
+  .pipe-step .k{font-size:11px; color:var(--muted-2); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:8px;}
+  .pipe-step .v{font-size:13.5px; color:var(--text); line-height:1.5;}
+  .pipe-step::after{
+    content:'→'; position:absolute; right:-11px; top:50%; transform:translateY(-50%);
+    color:var(--muted-2); font-size:14px; z-index:2;
+  }
+  .pipe-step:last-child::after{content:none;}
+  @media (max-width:700px){
+    .pipeline{flex-direction:column;}
+    .pipe-step{border-right:none; border-bottom:1px solid var(--border);}
+    .pipe-step::after{content:'↓'; right:auto; left:18px; top:auto; bottom:-11px; transform:none;}
+    .pipe-step:last-child{border-bottom:none;}
+  }
+
+  /* ---------- licensing ---------- */
+  .lic-split{
+    display:flex; border-top:1px solid var(--border); border-bottom:1px solid var(--border);
+  }
+  @media (max-width:700px){ .lic-split{flex-direction:column;} }
+  .lic-col{flex:1; padding:26px 30px;}
+  .lic-col + .lic-col{border-left:1px solid var(--border);}
+  @media (max-width:700px){
+    .lic-col + .lic-col{border-left:none; border-top:1px solid var(--border);}
+  }
+  .lic-marker{
+    display:inline-flex; align-items:center; gap:8px;
+    font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:0.05em;
+    margin-bottom:14px;
+  }
+  .lic-marker .dot{display:inline-block; width:7px; height:7px; border-radius:1px;}
+  .lic-marker.open{color:var(--green);}
+  .lic-marker.open .dot{background:var(--green);}
+  .lic-marker.closed{color:var(--hot);}
+  .lic-marker.closed .dot{background:var(--hot);}
+  .lic-col h3{font-size:17px; margin-bottom:12px; font-weight:600;}
+  .lic-col ul{list-style:none; font-size:14px; color:var(--muted);}
+  .lic-col li{padding:6px 0; border-top:1px solid var(--border); font-family:var(--mono); font-size:13px;}
+  .lic-col li:first-child{border-top:none;}
+
+  /* ---------- design partner trade ---------- */
+  .trade-card{
+    display:flex; align-items:stretch; border-top:1px solid var(--border); border-bottom:1px solid var(--border);
+  }
+  .trade-col{flex:1; padding:28px 30px;}
+  .trade-divider{
+    display:flex; align-items:center; justify-content:center;
+    width:52px; flex-shrink:0; border-left:1px solid var(--border);
+    border-right:1px solid var(--border);
+    font-size:16px; color:var(--muted-2);
+  }
+  .trade-label{
+    font-family:var(--mono); font-size:12px; letter-spacing:0.05em; text-transform:uppercase;
+    color:var(--green); margin-bottom:16px;
+  }
+  .trade-label.muted{color:var(--cold);}
+  .trade-list{list-style:none; font-size:14px;}
+  .trade-list li{
+    padding:8px 0 8px 22px; border-top:1px solid var(--border);
+    color:var(--text); position:relative;
+  }
+  .trade-list li:first-child{border-top:none;}
+  .trade-list.get li::before{
+    content:'✓'; position:absolute; left:0; color:var(--green); font-size:12px; top:9px;
+  }
+  .trade-list.ask li::before{
+    content:'–'; position:absolute; left:2px; color:var(--cold); font-size:12px; top:9px;
+  }
+  @media (max-width:700px){
+    .trade-card{flex-direction:column;}
+    .trade-divider{width:100%; height:36px; border-left:none; border-right:none; border-top:1px solid var(--border); border-bottom:1px solid var(--border);}
+  }
+
+  /* ---------- final cta ---------- */
+  .final{border-top:1px solid var(--border); text-align:center;}
+  .final h2{margin-bottom:14px;}
+  .final p{color:var(--muted); max-width:44ch; margin:0 auto 34px;}
+  .final .hero-links{justify-content:center; margin-bottom:0;}
+
+  footer{border-top:1px solid var(--border); padding:28px 0;}
+  footer .wrap{display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;}
+  footer{font-family:var(--mono); font-size:12.5px; color:var(--muted-2);}
+  footer a{text-decoration:none;}
+  footer a:hover{color:var(--muted);}
+  footer .soon{cursor:default;}
+  footer .soon::after{content:' (soon)'; color:var(--muted-2); opacity:0.65;}
+
+  @media (prefers-reduced-motion: reduce){
+    html{scroll-behavior:auto;}
+  }
+</style>
+</head>
+<body>
+
+<a class="skip-link" href="#main">Skip to content</a>
+
+<nav>
+  <div class="wrap">
+    <div class="logo"><span class="dot" aria-hidden="true"></span>memaudit</div>
+    <div class="navlinks">
+      <a href="#problem">Why</a>
+      <a href="#how">Collectors</a>
+      <a href="#pipeline">Pipeline</a>
+      <a href="#license">License</a>
+      <a href="#partners">Design partners</a>
+    </div>
+    <a class="nav-cta" href="#partners">Apply →</a>
+  </div>
+</nav>
+
+<header class="hero" id="main">
+  <div class="wrap">
+    <div class="hero-status">pre-GA — onboarding a first cohort of design partners</div>
+    <div class="hero-prompt"><span class="prompt-symbol">$</span> memauditd scan --duration 24h<span class="cursor">▍</span></div>
+
+    <div class="hero-number">
+      <span class="num">41.2</span><span class="unit">GiB</span>
+    </div>
+    <div class="hero-tier">cold · idle &gt;1h · tier candidate</div>
+
+    <div class="hero-bar" aria-hidden="true">
+      <div class="bar-seg cold" style="width:32.2%"></div>
+      <div class="bar-seg warm" style="width:17.8%"></div>
+      <div class="bar-seg hot" style="width:7.3%"></div>
+    </div>
+    <div class="hero-bar-legend">
+      <span><i class="dot cold" aria-hidden="true"></i>cold&nbsp;<b>41.2&nbsp;GiB</b></span>
+      <span><i class="dot warm" aria-hidden="true"></i>warm&nbsp;<b>22.8&nbsp;GiB</b></span>
+      <span><i class="dot hot" aria-hidden="true"></i>hot&nbsp;<b>9.4&nbsp;GiB</b></span>
+      <span class="dim">of 128&nbsp;GiB, one host, 2 NUMA nodes</span>
+    </div>
+
+    <h1 class="hero-lead">Most of that memory never woke up.</h1>
+    <p class="hero-desc">
+      <strong>memaudit</strong> watches real access patterns — DAMON, PSI, NUMA, cgroup v2 —
+      and shows you exactly which pages are cold enough to tier, offload, or kill.
+      Before you buy another DIMM.
+    </p>
+
+    <div class="hero-links">
+      <a class="link-primary" href="#partners">Apply as a design partner →</a>
+      <span class="sep">·</span>
+      <a class="link-secondary" href="#pipeline">See how it works</a>
+    </div>
+  </div>
+
+  <div class="hero-visual wrap" aria-hidden="true">
+    <div class="hv-label"><span>before — raw noise</span><span>after — tiered by memaudit</span></div>
+    <canvas id="heat" width="640" height="360"></canvas>
+    <div class="heat-tooltip" id="heatTooltip"></div>
+    <div class="hv-caption">hover a page range · example scan, not live telemetry</div>
+  </div>
+</header>
+
+<section class="problem" id="problem">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="section-eyebrow">The problem</div>
+      <h2>GPUs get the budget. DRAM gets the silence.</h2>
+      <p>Inference fleets are provisioned for peak KV-cache and then sit mostly cold. Nobody’s watching, because the tooling that already exists in the kernel isn’t wired up.</p>
+    </div>
+    <div class="problem-grid">
+      <div class="problem-card">
+        <div class="num">01</div>
+        <p><strong>DRAM is now the second-biggest line item</strong> on most inference fleets, right after the accelerators — and it’s the one nobody instruments.</p>
+      </div>
+      <div class="problem-card">
+        <div class="num">02</div>
+        <p><strong>Fleets are sized for the worst hour of the day.</strong> Outside of that hour, a large share of allocated memory just sits there, untouched, fully paid for.</p>
+      </div>
+      <div class="problem-card">
+        <div class="num">03</div>
+        <p><strong>The kernel already knows what’s cold.</strong> DAMON, PSI, and cgroup v2 expose access patterns today — almost nobody scrapes them into a decision.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="section-eyebrow">Collectors</div>
+      <h2>One agent, every signal that actually matters.</h2>
+      <p>memauditd runs as a single lightweight daemon and pulls from the sources that already exist on your boxes — no kernel patches, no sidecars per GPU.</p>
+    </div>
+    <div class="coll-layout">
+      <div class="coll-grid" id="collGrid">
+        <div class="coll-card" data-source="/proc/meminfo" data-interval="5s">
+          <div class="coll-head"><span class="coll-name">meminfo</span><span class="coll-tag tag-kernel">kernel</span></div>
+          <p>Baseline memory accounting — free, cached, buffers, swap — sampled continuously.</p>
+        </div>
+        <div class="coll-card" data-source="/proc/pressure/memory" data-interval="5s">
+          <div class="coll-head"><span class="coll-name">PSI</span><span class="coll-tag tag-kernel">kernel</span></div>
+          <p>Pressure stall information: how long processes actually wait on memory, not just how much they hold.</p>
+        </div>
+        <div class="coll-card" data-source="/sys/devices/system/node/node*/meminfo" data-interval="15s">
+          <div class="coll-head"><span class="coll-name">NUMA</span><span class="coll-tag tag-kernel">kernel</span></div>
+          <p>Per-node allocation and access locality, so tiering decisions respect topology instead of fighting it.</p>
+        </div>
+        <div class="coll-card" data-source="/sys/fs/cgroup/**/memory.stat" data-interval="10s">
+          <div class="coll-head"><span class="coll-name">cgroup v2</span><span class="coll-tag tag-kernel">kernel</span></div>
+          <p>Per-workload memory accounting that maps straight onto how you already isolate tenants.</p>
+        </div>
+        <div class="coll-card" data-source="/sys/kernel/mm/damon/admin" data-interval="30s">
+          <div class="coll-head"><span class="coll-name">DAMON</span><span class="coll-tag tag-kernel">kernel</span></div>
+          <p>The kernel’s own access-pattern monitor, read straight from sysfs — the source of the hot/cold classification.</p>
+        </div>
+        <div class="coll-card gpu" data-source="libnvidia-ml.so" data-interval="5s">
+          <div class="coll-head"><span class="coll-name">NVML</span><span class="coll-tag tag-gpu">gpu</span></div>
+          <p>GPU memory and utilization, correlated against host-side pressure to catch host/device imbalance.</p>
+        </div>
+        <div class="coll-card gpu" data-source=":8000/metrics" data-interval="10s">
+          <div class="coll-head"><span class="coll-name">vLLM</span><span class="coll-tag tag-gpu">gpu</span></div>
+          <p>Scrapes vLLM’s own Prometheus endpoint to tie KV-cache size directly to the pages backing it.</p>
+        </div>
+      </div>
+
+      <aside class="coll-visual">
+        <div class="cv-panel kernel" id="cvPanel">
+          <div class="cv-header">
+            <span class="cv-eyebrow">now watching</span>
+            <span class="cv-active" id="cvActive">meminfo</span>
+          </div>
+          <div class="cv-grid" id="cvGrid">
+            <div class="cv-divider" id="cvDivider" aria-hidden="true"></div>
+          </div>
+          <div class="cv-meta" id="cvMeta">
+            <div class="cv-meta-row"><span>source</span><span id="cvSource">/proc/meminfo</span></div>
+            <div class="cv-meta-row"><span>interval</span><span id="cvInterval">5s</span></div>
+            <div class="cv-meta-row"><span>sampled</span><span id="cvSampled">28 ranges</span></div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<section id="pipeline">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="section-eyebrow">Pipeline</div>
+      <h2>From /proc to a decision.</h2>
+      <p>Every collector lands in the same pipeline, so a page’s temperature is always traceable back to the raw signal that produced it.</p>
+    </div>
+    <div class="pipeline">
+      <div class="pipe-step"><div class="k">01 collect</div><div class="v">Agent samples kernel + GPU sources on every host.</div></div>
+      <div class="pipe-step"><div class="k">02 ingest</div><div class="v">Samples batched and shipped off-host, gaps and clock skew handled.</div></div>
+      <div class="pipe-step"><div class="k">03 store</div><div class="v">Written to ClickHouse as a time series, one row per page range per interval.</div></div>
+      <div class="pipe-step"><div class="k">04 analyze</div><div class="v">Query set classifies hot / warm / cold and flags tiering candidates.</div></div>
+      <div class="pipe-step"><div class="k">05 report</div><div class="v">A plain summary of what’s cold, where it lives, and what it’s costing you.</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="license">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="section-eyebrow">Licensing</div>
+      <h2>The agent is yours. The intelligence is ours.</h2>
+      <p>You should be able to read and audit anything running on your kernel. The analysis on top is how this stays a business.</p>
+    </div>
+    <div class="lic-split">
+      <div class="lic-col">
+        <div class="lic-marker open"><i class="dot" aria-hidden="true"></i>Apache-2.0</div>
+        <h3>Runs on your box</h3>
+        <ul>
+          <li>memauditd agent</li>
+          <li>pkg/damon (DAMON sysfs client)</li>
+          <li>collector interfaces</li>
+        </ul>
+      </div>
+      <div class="lic-col">
+        <div class="lic-marker closed"><i class="dot" aria-hidden="true"></i>Proprietary</div>
+        <h3>Runs on ours</h3>
+        <ul>
+          <li>Ingest pipeline</li>
+          <li>Analysis query set</li>
+          <li>Report generator</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="partners">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="section-eyebrow">Design partners</div>
+      <h2>We’re taking on a small first cohort.</h2>
+      <p>memaudit is pre-GA. Instead of a public download, a handful of teams get early access in exchange for running it on a real fleet and telling us when the classification is wrong.</p>
+    </div>
+    <div class="trade-card">
+      <div class="trade-col">
+        <div class="trade-label">You get</div>
+        <ul class="trade-list get">
+          <li>Agent + reports before general availability</li>
+          <li>Direct line to the people building it</li>
+          <li>Input on which collectors ship next</li>
+          <li>Pricing locked in ahead of GA</li>
+        </ul>
+      </div>
+      <div class="trade-divider" aria-hidden="true">⇄</div>
+      <div class="trade-col">
+        <div class="trade-label muted">We ask</div>
+        <ul class="trade-list ask">
+          <li>Run it on production or near-production infra</li>
+          <li>A short call most weeks during onboarding</li>
+          <li>Tell us when a cold/hot call is wrong</li>
+          <li>Comfort with an agent that’s still moving fast</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="final" id="install">
+  <div class="wrap">
+    <h2>Find out what your fleet is actually doing.</h2>
+    <p>A handful of design partner slots are open now. Tell us about your fleet and we’ll get back to you within a few days.</p>
+    <div class="hero-links" style="justify-content:center;">
+      <a class="link-primary" href="mailto:partners@memaudit.dev">Apply as a design partner →</a>
+      <span class="sep">·</span>
+      <a class="link-secondary" href="#how">See what it collects</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>memaudit — agent core is Apache-2.0.</div>
+    <div><a href="https://github.com/memaudit/memaudit" target="_blank" rel="noopener noreferrer">source</a> · <span class="soon">docs</span> · <span class="soon">changelog</span></div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  const canvas = document.getElementById('heat');
+  const ctx = canvas.getContext('2d');
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const cols = 20, rows = 10;
+  const aspect = 360 / 640; // preserve the original 16:9-ish ratio
+
+  let w, h, cellW, cellH;
+
+  function sizeCanvas(){
+    const dpr = window.devicePixelRatio || 1;
+    const displayWidth = canvas.clientWidth || canvas.getBoundingClientRect().width || 640;
+    const displayHeight = displayWidth * aspect;
+    canvas.width = Math.round(displayWidth * dpr);
+    canvas.height = Math.round(displayHeight * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    w = displayWidth;
+    h = displayHeight;
+    cellW = (w/2) / cols;
+    cellH = h / rows;
+  }
+  sizeCanvas();
+
+  let resizeTimer;
+  window.addEventListener('resize', ()=>{
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(()=>{
+      sizeCanvas();
+      if(reduceMotion) frame();
+    }, 120);
+  });
+
+  const pad = 3;
+
+  // before: chaotic random heat. after: organized bands (cold at edges, warm center-ish)
+  let beforeVals = new Array(cols*rows).fill(0).map(()=>Math.random());
+  let afterTarget = [];
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      // banded: outer ring cold, inner warm, deterministic-ish
+      const distFromEdge = Math.min(r, rows-1-r, c, cols-1-c);
+      afterTarget.push(Math.max(0, 0.55 - distFromEdge*0.12) + Math.random()*0.06);
+    }
+  }
+  let afterVals = afterTarget.map(v=>v*0.2);
+
+  function lerp(a,b,t){return a+(b-a)*t;}
+
+  function colorFor(v, hue){
+    // hue: 'hot' or 'cold'
+    if(hue==='hot'){
+      // dark -> hot ember
+      const r = Math.round(lerp(30, 255, v));
+      const g = Math.round(lerp(20, 107, v));
+      const b = Math.round(lerp(25, 74, v));
+      return `rgb(${r},${g},${b})`;
+    } else {
+      const r = Math.round(lerp(20, 79, v));
+      const g = Math.round(lerp(28, 163, v));
+      const b = Math.round(lerp(35, 209, v));
+      return `rgb(${r},${g},${b})`;
+    }
+  }
+
+  function drawGrid(vals, offsetX, hue){
+    for(let r=0;r<rows;r++){
+      for(let c=0;c<cols;c++){
+        const idx = r*cols+c;
+        const v = vals[idx];
+        ctx.fillStyle = colorFor(Math.min(1,Math.max(0,v)), hue);
+        ctx.fillRect(offsetX + c*cellW + pad/2, r*cellH + pad/2, cellW-pad, cellH-pad);
+      }
+    }
+  }
+
+  function frame(){
+    ctx.clearRect(0,0,w,h);
+    // before: jitter randomly
+    for(let i=0;i<beforeVals.length;i++){
+      beforeVals[i] = lerp(beforeVals[i], Math.random(), 0.12);
+    }
+    // after: settle toward target
+    for(let i=0;i<afterVals.length;i++){
+      afterVals[i] = lerp(afterVals[i], afterTarget[i], 0.04);
+    }
+    drawGrid(beforeVals, 0, 'hot');
+    drawGrid(afterVals, w/2, 'cold');
+
+    // divider
+    ctx.fillStyle = '#232b32';
+    ctx.fillRect(w/2 - 1, 0, 2, h);
+
+    if(!reduceMotion) requestAnimationFrame(frame);
+  }
+
+  if(reduceMotion){
+    // draw a single settled frame
+    afterVals = afterTarget.slice();
+    frame();
+  } else {
+    requestAnimationFrame(frame);
+  }
+
+  // ---- interactive tooltip ----
+  const tooltip = document.getElementById('heatTooltip');
+
+  function hashFrac(i){
+    const x = Math.sin(i * 12.9898 + 78.233) * 43758.5453;
+    return x - Math.floor(x);
+  }
+
+  canvas.addEventListener('mousemove', (e)=>{
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = w / rect.width, scaleY = h / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+    const side = x < w/2 ? 'before' : 'after';
+    const localX = side === 'before' ? x : x - w/2;
+    const col = Math.min(cols-1, Math.max(0, Math.floor(localX / cellW)));
+    const row = Math.min(rows-1, Math.max(0, Math.floor(y / cellH)));
+    const idx = row*cols + col;
+
+    const addr = '0x7f' + (idx*0x1000 + 0x10000000).toString(16).padStart(10,'0');
+    let html;
+    if(side === 'before'){
+      html = `<div class="addr">${addr}</div><div class="hot-line">unclassified</div><div class="dim">scanning…</div>`;
+    } else {
+      const numa = idx % 2;
+      const v = afterVals[idx] || 0;
+      if(v > 0.4){
+        const lastTouch = Math.floor(hashFrac(idx+300) * 8) + 1;
+        html = `<div class="addr">${addr}</div><div class="cold-line">NUMA${numa} · active</div><div class="dim">last touch ${lastTouch}m ago</div>`;
+      } else {
+        const idleMin = Math.floor(hashFrac(idx+100) * 165) + 15;
+        html = `<div class="addr">${addr}</div><div class="cold-line">NUMA${numa} · idle ${idleMin}m</div><div class="dim">cold · tier candidate</div>`;
+      }
+    }
+    tooltip.innerHTML = html;
+    tooltip.classList.add('show');
+
+    // position relative to viewport (fixed), clamped so it never runs off-screen
+    let left = e.clientX + 16;
+    let top = e.clientY + 16;
+    const tw = tooltip.offsetWidth || 150;
+    const th = tooltip.offsetHeight || 60;
+    if(left + tw > window.innerWidth - 12) left = e.clientX - tw - 16;
+    if(top + th > window.innerHeight - 12) top = e.clientY - th - 16;
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = top + 'px';
+  });
+  canvas.addEventListener('mouseleave', ()=> tooltip.classList.remove('show'));
+})();
+</script>
+
+<script>
+// ---- cursor glow on collector cards ----
+document.querySelectorAll('.coll-card').forEach(card=>{
+  card.addEventListener('mousemove', (e)=>{
+    const r = card.getBoundingClientRect();
+    card.style.setProperty('--mx', (e.clientX - r.left) + 'px');
+    card.style.setProperty('--my', (e.clientY - r.top) + 'px');
+  });
+});
+
+// ---- scroll-linked collector visual ----
+(function(){
+  const cvGrid = document.getElementById('cvGrid');
+  const cvPanel = document.getElementById('cvPanel');
+  const cvActive = document.getElementById('cvActive');
+  const cvDivider = document.getElementById('cvDivider');
+  const cvSource = document.getElementById('cvSource');
+  const cvInterval = document.getElementById('cvInterval');
+  const cvSampled = document.getElementById('cvSampled');
+  const cards = document.querySelectorAll('.coll-card');
+  if(!cvGrid || !cards.length) return;
+
+  function hashFracLocal(i){
+    const x = Math.sin(i * 13.9898 + 45.233) * 23421.631;
+    return x - Math.floor(x);
+  }
+
+  // build 40 cells, weighted ~70% kernel / 30% gpu, deterministic
+  const total = 40;
+  for(let i=0;i<total;i++){
+    const cell = document.createElement('div');
+    const frac = Math.abs(Math.sin(i*17.31));
+    cell.className = 'cv-cell ' + (frac < 0.32 ? 'gpu' : 'kernel');
+    cvGrid.appendChild(cell);
+  }
+
+  function setActive(card){
+    const name = card.querySelector('.coll-name').textContent;
+    const isGpu = card.classList.contains('gpu');
+    cvActive.textContent = name;
+    cvPanel.classList.toggle('gpu', isGpu);
+    cvPanel.classList.toggle('kernel', !isGpu);
+    cvDivider.classList.toggle('show', name === 'NUMA');
+
+    // seed a per-collector subset of its own group's cells, so different
+    // collectors in the same group (e.g. meminfo vs PSI) light up differently
+    let seed = 0;
+    for(let i=0;i<name.length;i++) seed += name.charCodeAt(i) * (i+11);
+    const groupCells = cvGrid.querySelectorAll('.cv-cell.' + (isGpu ? 'gpu' : 'kernel'));
+    cvGrid.querySelectorAll('.cv-cell').forEach(c=> c.classList.remove('active'));
+    let litCount = 0;
+    groupCells.forEach((cell, i)=>{
+      const f = hashFracLocal(seed + i*4.13);
+      if(f < 0.62){ cell.classList.add('active'); litCount++; }
+    });
+
+    cvSource.textContent = card.dataset.source || '—';
+    cvInterval.textContent = card.dataset.interval || '—';
+    cvSampled.textContent = litCount + ' ranges';
+  }
+
+  const observer = new IntersectionObserver((entries)=>{
+    entries.forEach(entry=>{
+      if(entry.isIntersecting) setActive(entry.target);
+    });
+  }, { root:null, rootMargin:'-45% 0px -45% 0px', threshold:0 });
+
+  cards.forEach(c=>{
+    observer.observe(c);
+    c.addEventListener('mouseenter', ()=> setActive(c));
+  });
+
+  setActive(cards[0]);
+})();
+</script>
+
+</body>
+</html>
